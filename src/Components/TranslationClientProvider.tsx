@@ -1,7 +1,5 @@
 import React from 'react';
-import { TranslationNamespaceObserver } from '..';
 import { TranslationClient } from '../Core/translationClient';
-import { createTranslationNamespaceObserver } from '../Core/translationObserver';
 
 const context = React.createContext<TranslationClient | undefined>(undefined)
 
@@ -17,21 +15,4 @@ export const useTranslationClient = (): TranslationClient => {
   }
 
   return translationClient
-}
-
-export function useTranslations(namespaceName: string) {
-  const client = useTranslationClient();
-
-  const [, rerender] = React.useReducer((i: number) => i + 1, 0);
-
-  const observerRef = React.useRef<TranslationNamespaceObserver>();
-  if (!observerRef.current) {
-    observerRef.current = createTranslationNamespaceObserver(client, namespaceName);
-  }
-
-  React.useEffect(() => {
-    return observerRef.current?.subscribe(rerender);
-  }, [])
-
-  return observerRef.current.getResult();
 }
