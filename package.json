@@ -1,0 +1,64 @@
+{
+  "name": "reactlinguini",
+  "version": "1.0.0",
+  "description": "Lightweight, headless internationalization library for React with dynamic namespace loading, fallbacks, and fetching states.",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "react",
+    "i18n",
+    "headless",
+    "translation",
+    "internationalization",
+    "loader",
+    "namespace",
+    "linguini"
+  ],
+  "author": "patatestack",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/patatestack/reactlinguini.git"
+  },
+  "homepage": "https://github.com/patatestack/reactlinguini#readme",
+  "bugs": {
+    "url": "https://github.com/patatestack/reactlinguini/issues"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^14.2.1",
+    "@types/react": "^18.2.55",
+    "@types/react-dom": "^18.2.19",
+    "jsdom": "^24.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsup": "^8.0.2",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.2"
+  }
+}
