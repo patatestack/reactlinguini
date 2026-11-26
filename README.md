@@ -131,13 +131,20 @@ createLinguini({
   fallbackLoadStrategy: 'onMissing', // 'eager' (default) | 'onError' | 'onMissing'
   missingKeyFallback: '',            // string or (ns, key) => string
   nsSeparator: false,                // allow ':' inside translation keys
-  retry: { maxRetries: 2, retryDelay: (attempt) => attempt * 200 },
+  retry: {
+    maxRetries: 2,
+    retryDelay: (attempt) => attempt * 200,
+    shouldRetry: (err) => !(err instanceof Error && err.message.includes('404')),
+  },
   loader,
 });
 
 // Inline default values with optional interpolation
 t('greeting', 'Hello {name}', { name: 'Ada' });
 t('greeting', { defaultValue: 'Hello {name}', name: 'Ada' });
+// Note: `defaultValue` is reserved in the params object; if you have an interpolation
+// placeholder named `{defaultValue}`, pass the default text positionally:
+t('greeting', 'Fallback', { defaultValue: 'value' });
 ```
 
 ### Per-Namespace Loaders & Partial Namespace Loading (Optional)

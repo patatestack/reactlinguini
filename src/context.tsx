@@ -109,6 +109,74 @@ function areTranslationSnapshotsEqual(a: TranslationSnapshot, b: TranslationSnap
   return true;
 }
 
+function resolveLangNamespaceEntry(
+  state: LinguiniState,
+  config: LinguiniStore['config'],
+  lang: string,
+  ns: string,
+  keyPrefix: string | undefined
+): { status: NamespaceLoadingStatus; hasData: boolean } {
+  const isPartial = Boolean(config.namespaces?.[ns]?.partial && keyPrefix);
+  const targetVersionStr = (state.targetVersions[ns] ?? config.defaultVersion) ?? '';
+
+  if (isPartial) {
+    const fullStatus = state.loadingStates[lang]?.[ns];
+    const fullVersion = state.versions[lang]?.[ns];
+    if (fullStatus === 'loaded' && fullVersion === targetVersionStr) {
+      return { status: 'loaded', hasData: true };
+    }
+    const pStatus = state.partialLoadingStates[lang]?.[ns]?.[keyPrefix!] || 'idle';
+    const pVersion = state.partialVersions[lang]?.[ns]?.[keyPrefix!];
+    const status = pStatus === 'loaded' && pVersion !== targetVersionStr ? 'idle' : pStatus;
+    const hasData = pVersion !== undefined || fullVersion !== undefined;
+    return { status, hasData };
+  }
+
+  const fStatus = state.loadingStates[lang]?.[ns] || 'idle';
+  const fVersion = state.versions[lang]?.[ns];
+  const status = fStatus === 'loaded' && fVersion !== targetVersionStr ? 'idle' : fStatus;
+  const hasData = fVersion !== undefined;
+  return { status, hasData };
+}
+
+function resolveNamespaceEntry(
+  state: LinguiniState,
+  config: LinguiniStore['config'],
+  ns: string,
+  keyPrefix: string | undefined
+): { status: NamespaceLoadingStatus; hasData: boolean } {
+  const activeLang = state.language;
+  const activeEntry = resolveLangNamespaceEntry(state, config, activeLang, ns, keyPrefix);
+
+  if (activeEntry.status !== 'error') {
+    return activeEntry;
+  }
+
+  const defaultLang = config.defaultLanguage;
+  if (defaultLang !== activeLang) {
+    const defaultEntry = resolveLangNamespaceEntry(state, config, defaultLang, ns, keyPrefix);
+    if (defaultEntry.status === 'loaded' || defaultEntry.status === 'loading') {
+      return {
+        status: defaultEntry.status,
+        hasData: defaultEntry.hasData || activeEntry.hasData,
+      };
+    }
+  }
+
+  const fallbackLang = config.fallbackLanguage;
+  if (fallbackLang && fallbackLang !== activeLang && fallbackLang !== defaultLang) {
+    const fallbackEntry = resolveLangNamespaceEntry(state, config, fallbackLang, ns, keyPrefix);
+    if (fallbackEntry.status === 'loaded' || fallbackEntry.status === 'loading') {
+      return {
+        status: fallbackEntry.status,
+        hasData: fallbackEntry.hasData || activeEntry.hasData,
+      };
+    }
+  }
+
+  return activeEntry;
+}
+
 /**
  * Hook to translate keys within specific namespaces.
  * Automatically triggers namespace loading when mounted, language changes, or target versions update.
@@ -139,33 +207,7 @@ export function useTranslation<
       const entries: NamespaceEntrySnapshot[] = nsList.map((ns) => {
         const isPartial = Boolean(store.config.namespaces?.[ns]?.partial && keyPrefix);
         const targetVersion = state.targetVersions[ns] ?? store.config.defaultVersion;
-        const targetVersionStr = targetVersion ?? '';
-
-        let status: NamespaceLoadingStatus;
-        let hasData = false;
-
-        if (isPartial) {
-          const fullStatus = state.loadingStates[activeLang]?.[ns];
-          const fullVersion = state.versions[activeLang]?.[ns];
-          if (fullStatus === 'loaded' && fullVersion === targetVersionStr) {
-            status = 'loaded';
-            hasData = true;
-          } else {
-            const pStatus = state.partialLoadingStates[activeLang]?.[ns]?.[keyPrefix!] || 'idle';
-            const pVersion = state.partialVersions[activeLang]?.[ns]?.[keyPrefix!];
-            status =
-              pStatus === 'loaded' && pVersion !== targetVersionStr ? 'idle' : pStatus;
-            hasData =
-              pVersion !== undefined ||
-              (fullStatus === 'loaded' && fullVersion !== undefined);
-          }
-        } else {
-          const fStatus = state.loadingStates[activeLang]?.[ns] || 'idle';
-          const fVersion = state.versions[activeLang]?.[ns];
-          status =
-            fStatus === 'loaded' && fVersion !== targetVersionStr ? 'idle' : fStatus;
-          hasData = fVersion !== undefined;
-        }
+        const { status, hasData } = resolveNamespaceEntry(state, store.config, ns, keyPrefix);
 
         const getSlice = (lang: string | undefined) => {
           if (!lang) return undefined;
@@ -416,30 +458,10 @@ export function useLanguage() {
  */
 export function useNamespaceStatus(ns: string, keyPrefix?: string): NamespaceLoadingStatus {
   const store = useLinguiniStore();
-  return useStoreSelector(store, (state) => {
-    const lang = state.language;
-    const targetVersionStr = (state.targetVersions[ns] ?? store.config.defaultVersion) ?? '';
-
-    if (keyPrefix && store.config.namespaces?.[ns]?.partial) {
-      if (
-        state.loadingStates[lang]?.[ns] === 'loaded' &&
-        state.versions[lang]?.[ns] === targetVersionStr
-      ) {
-        return 'loaded';
-      }
-      const pStatus = state.partialLoadingStates[lang]?.[ns]?.[keyPrefix] || 'idle';
-      const pVer = state.partialVersions[lang]?.[ns]?.[keyPrefix];
-      return pStatus === 'loaded' && pVersionDiffers(pVer, targetVersionStr) ? 'idle' : pStatus;
-    }
-
-    const fStatus = state.loadingStates[lang]?.[ns] || 'idle';
-    const fVer = state.versions[lang]?.[ns];
-    return fStatus === 'loaded' && pVersionDiffers(fVer, targetVersionStr) ? 'idle' : fStatus;
-  });
-}
-
-function pVersionDiffers(loadedVersion: string | undefined, targetVersionStr: string): boolean {
-  return loadedVersion !== undefined && loadedVersion !== targetVersionStr;
+  return useStoreSelector(
+    store,
+    (state) => resolveNamespaceEntry(state, store.config, ns, keyPrefix).status
+  );
 }
 
 /**

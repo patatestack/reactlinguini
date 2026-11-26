@@ -6,6 +6,7 @@ import {
   deepMerge,
   setNestedValue,
   setNestedValues,
+  omitNestedPaths,
 } from '../utils';
 
 describe('utils', () => {
@@ -229,6 +230,32 @@ describe('utils', () => {
       });
       expect(safe).toBe(original);
       expect(({} as any).polluted).toBeUndefined();
+    });
+  });
+
+  describe('omitNestedPaths', () => {
+    it('omits top-level and dotted paths immutably while preserving untouched sibling references', () => {
+      const keep = { label: 'Keep' };
+      const original = {
+        a: { text: 'Remove me' },
+        keep,
+        settings: { theme: 'Dark', lang: 'EN' },
+      };
+
+      const next = omitNestedPaths(original, ['a', 'settings.theme', 'missing.path']);
+      expect(next).toEqual({
+        keep: { label: 'Keep' },
+        settings: { lang: 'EN' },
+      });
+      expect(next.keep).toBe(keep);
+      expect(original.a).toEqual({ text: 'Remove me' });
+      expect(original.settings.theme).toBe('Dark');
+    });
+
+    it('returns source unchanged when no paths match or paths are unsafe', () => {
+      const original = { a: { b: 1 } };
+      expect(omitNestedPaths(original, [])).toBe(original);
+      expect(omitNestedPaths(original, ['nonexistent', '__proto__.polluted'])).toBe(original);
     });
   });
 });

@@ -129,6 +129,70 @@ export function setNestedValues(
 }
 
 /**
+ * Immutably removes dot-notated paths from `source` while preserving references for untouched subtrees.
+ */
+export function omitNestedPaths(
+  source: Record<string, any>,
+  paths: string[]
+): Record<string, any> {
+  if (!isPlainObject(source) || paths.length === 0) {
+    return isPlainObject(source) ? source : {};
+  }
+
+  let base: Record<string, any> | undefined;
+  const cloned = new WeakSet<object>();
+
+  const ensureBase = (): Record<string, any> => {
+    if (!base) {
+      base = { ...source };
+      cloned.add(base);
+    }
+    return base;
+  };
+
+  for (const path of paths) {
+    if (!path) continue;
+    const parts = path.split('.');
+    if (parts.some((part) => !part || UNSAFE_KEYS.has(part))) {
+      continue;
+    }
+
+    let probe: any = base ?? source;
+    let exists = true;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const next = probe[parts[i]];
+      if (!isPlainObject(next)) {
+        exists = false;
+        break;
+      }
+      probe = next;
+    }
+
+    const leaf = parts[parts.length - 1];
+    if (!exists || !Object.prototype.hasOwnProperty.call(probe, leaf)) {
+      continue;
+    }
+
+    let current = ensureBase();
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      const existing = current[part];
+      if (!cloned.has(existing)) {
+        const copy = { ...existing };
+        cloned.add(copy);
+        current[part] = copy;
+        current = copy;
+      } else {
+        current = existing;
+      }
+    }
+    delete current[leaf];
+  }
+
+  return base ?? source;
+}
+
+/**
  * Immutably sets a value at a dot-notated path in a nested object.
  * If both the existing leaf and the new value are plain objects, they are deep-merged.
  */

@@ -710,4 +710,153 @@ describe('React Integration Hooks', () => {
       expect(renderCount.value).toBeLessThanOrEqual(3);
     });
   });
+
+  describe('fallback readiness and partial/full ready isolation', () => {
+    it('becomes ready and cleared of error when active fails and default/fallback loads under onError', async () => {
+      // @ts-ignore
+      globalThis.navigator = { languages: ['fr-FR'] };
+
+      const loader = vi.fn().mockImplementation(async (lang, ns) => {
+        await new Promise((res) => setTimeout(res, 15));
+        if (ns === 'fallbackOk') {
+          if (lang === 'fr') throw new Error('FR failed');
+          if (lang === 'en') return { msg: 'Hello' };
+        }
+        if (ns === 'secondFallbackOk') {
+          if (lang === 'fr' || lang === 'en') throw new Error(`${lang} failed`);
+          if (lang === 'es') return { msg: 'Hola' };
+        }
+        if (ns === 'allFail') {
+          throw new Error(`${lang} failed`);
+        }
+        return {};
+      });
+
+      const app = createLinguini({
+        supportedLanguages: ['en', 'fr', 'es'],
+        defaultLanguage: 'en',
+        fallbackLanguage: 'es',
+        fallbackLoadStrategy: 'onError',
+        loader,
+      });
+
+      const View = () => {
+        const fb1 = app.useTranslation('fallbackOk');
+        const fb1Status = useNamespaceStatus('fallbackOk');
+        const fb2 = app.useTranslation('secondFallbackOk');
+        const allFail = app.useTranslation('allFail');
+        return (
+          <div>
+            <div data-testid="fb1-ready">{String(fb1.ready)}</div>
+            <div data-testid="fb1-status">{fb1.status}</div>
+            <div data-testid="fb1-hook-status">{fb1Status}</div>
+            <div data-testid="fb1-err">{fb1.error ? 'err' : 'none'}</div>
+            <div data-testid="fb1-text">{fb1.ready ? fb1.t('msg') : 'skeleton'}</div>
+
+            <div data-testid="fb2-ready">{String(fb2.ready)}</div>
+            <div data-testid="fb2-status">{fb2.status}</div>
+            <div data-testid="fb2-text">{fb2.ready ? fb2.t('msg') : 'skeleton'}</div>
+
+            <div data-testid="fail-ready">{String(allFail.ready)}</div>
+            <div data-testid="fail-status">{allFail.status}</div>
+            <div data-testid="fail-err">{allFail.error ? 'err' : 'none'}</div>
+          </div>
+        );
+      };
+
+      render(
+        <app.LinguiniProvider>
+          <View />
+        </app.LinguiniProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('fb1-ready').textContent).toBe('true');
+        expect(screen.getByTestId('fb2-ready').textContent).toBe('true');
+        expect(screen.getByTestId('fail-status').textContent).toBe('error');
+      });
+
+      expect(screen.getByTestId('fb1-status').textContent).toBe('loaded');
+      expect(screen.getByTestId('fb1-hook-status').textContent).toBe('loaded');
+      expect(screen.getByTestId('fb1-err').textContent).toBe('none');
+      expect(screen.getByTestId('fb1-text').textContent).toBe('Hello');
+
+      expect(screen.getByTestId('fb2-status').textContent).toBe('loaded');
+      expect(screen.getByTestId('fb2-text').textContent).toBe('Hola');
+
+      expect(screen.getByTestId('fail-ready').textContent).toBe('false');
+      expect(screen.getByTestId('fail-err').textContent).toBe('err');
+    });
+
+    it('keeps ready false for whole-namespace consumers when only partial prefixes have loaded', async () => {
+      let resolveFull!: (data: Record<string, any>) => void;
+
+      const loader = vi.fn().mockImplementation((_lang, _ns, options) => {
+        if (options?.keyPrefixes?.length) {
+          return Promise.resolve({ '1': { text: 'One' } });
+        }
+        return new Promise<Record<string, any>>((res) => {
+          resolveFull = res;
+        });
+      });
+
+      const app = createLinguini({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        namespaces: {
+          codes: { partial: true, partialMergeStrategy: 'subtree' },
+        },
+        loader,
+      });
+
+      const RowOne = () => {
+        const { t, ready } = app.useTranslation('codes', { keyPrefix: '1' });
+        return <div data-testid="row1">{ready ? t('text') : 'loading'}</div>;
+      };
+
+      const WholeNs = () => {
+        const { t, ready, status } = app.useTranslation('codes');
+        return (
+          <div>
+            <div data-testid="whole-ready">{String(ready)}</div>
+            <div data-testid="whole-status">{status}</div>
+            <div data-testid="whole-text">{ready ? t('2.text') : 'skeleton'}</div>
+          </div>
+        );
+      };
+
+      const { rerender } = render(
+        <app.LinguiniProvider>
+          <RowOne />
+        </app.LinguiniProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('row1').textContent).toBe('One');
+      });
+      expect(app.store.getState().versions.en?.codes).toBeUndefined();
+
+      rerender(
+        <app.LinguiniProvider>
+          <RowOne />
+          <WholeNs />
+        </app.LinguiniProvider>
+      );
+
+      // While full load is still pending, whole-namespace consumer must NOT report ready: true
+      expect(screen.getByTestId('whole-ready').textContent).toBe('false');
+      expect(screen.getByTestId('whole-status').textContent).toBe('loading');
+      expect(screen.getByTestId('whole-text').textContent).toBe('skeleton');
+
+      await act(async () => {
+        resolveFull({ '1': { text: 'One' }, '2': { text: 'Two' } });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('whole-ready').textContent).toBe('true');
+      });
+      expect(screen.getByTestId('whole-status').textContent).toBe('loaded');
+      expect(screen.getByTestId('whole-text').textContent).toBe('Two');
+    });
+  });
 });

@@ -5,6 +5,11 @@ export type FallbackLoadStrategy = 'eager' | 'onError' | 'onMissing';
 export interface RetryConfig {
   maxRetries: number;
   retryDelay?: number | ((attempt: number, error: unknown) => number);
+  /**
+   * Optional predicate to decide whether a failed load should be retried (e.g. skip 4xx HTTP errors).
+   * Receives the thrown error and 1-based retry attempt number. Defaults to retrying all errors up to `maxRetries`.
+   */
+  shouldRetry?: (error: unknown, attempt: number) => boolean;
 }
 
 export interface TranslateParams {

@@ -137,7 +137,11 @@ describe('TypeScript per-namespace type inference', () => {
       fallbackLoadStrategy: 'onMissing',
       missingKeyFallback: (_ns, key) => key,
       nsSeparator: false,
-      retry: { maxRetries: 2, retryDelay: (attempt) => attempt * 100 },
+      retry: {
+        maxRetries: 2,
+        retryDelay: (attempt) => attempt * 100,
+        shouldRetry: (error, attempt) => attempt <= 2 && error instanceof Error,
+      },
       namespaces: {
         common: {
           fallbackLoadStrategy: 'onError',

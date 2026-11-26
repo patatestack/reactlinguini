@@ -592,5 +592,110 @@ describe('LinguiniStore', () => {
       );
       expect(store.getState().loadingStates.en?.missingLoader).toBe('error');
     });
+
+    it('respects shouldRetry predicate (e.g. skips 404 while retrying 500)', async () => {
+      const shouldRetry = vi.fn((err: unknown) => {
+        return (err as { status?: number })?.status !== 404;
+      });
+
+      const notFoundLoader = vi.fn().mockRejectedValue(Object.assign(new Error('Not Found'), { status: 404 }));
+      let serverAttempts = 0;
+      const serverErrLoader = vi.fn().mockImplementation(async () => {
+        serverAttempts++;
+        if (serverAttempts < 2) {
+          throw Object.assign(new Error('Server Error'), { status: 500 });
+        }
+        return { msg: 'Recovered 500' };
+      });
+
+      const store = createLinguiniStore({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        retry: { maxRetries: 3, retryDelay: 0, shouldRetry },
+        namespaces: {
+          notFound: { loader: notFoundLoader },
+          transient500: { loader: serverErrLoader },
+        },
+      });
+
+      await expect(store.loadNamespace('en', 'notFound')).rejects.toThrow('Not Found');
+      expect(notFoundLoader).toHaveBeenCalledTimes(1);
+      expect(shouldRetry).toHaveBeenCalledWith(expect.objectContaining({ status: 404 }), 1);
+
+      await store.loadNamespace('en', 'transient500');
+      expect(serverErrLoader).toHaveBeenCalledTimes(2);
+      expect(store.translate('transient500', 'msg')).toBe('Recovered 500');
+    });
+  });
+
+  describe('root partial merge stale-response protection', () => {
+    it('prevents an older out-of-order root batch from overwriting newer prefixes', async () => {
+      let resolveV1!: (data: Record<string, any>) => void;
+      let resolveV2!: (data: Record<string, any>) => void;
+
+      const rootLoader = vi.fn().mockImplementation((_lang, _ns, options) => {
+        if (options?.version === 'v1') {
+          return new Promise<Record<string, any>>((res) => {
+            resolveV1 = res;
+          });
+        }
+        return new Promise<Record<string, any>>((res) => {
+          resolveV2 = res;
+        });
+      });
+
+      const store = createLinguiniStore({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        versions: { rootNs: 'v1' },
+        namespaces: {
+          rootNs: { partial: true, partialMergeStrategy: 'root' },
+        },
+        loader: rootLoader,
+      });
+
+      const p1a = store.loadNamespace('en', 'rootNs', { keyPrefix: 'a' });
+      const p1b = store.loadNamespace('en', 'rootNs', { keyPrefix: 'b' });
+      const p1Theme = store.loadNamespace('en', 'rootNs', { keyPrefix: 'settings.theme' });
+      const p1Lang = store.loadNamespace('en', 'rootNs', { keyPrefix: 'settings.lang' });
+
+      // Allow batch 1 microtask to flush so loader is in flight
+      await Promise.resolve();
+
+      // Bump version and request only 'a' and 'settings.theme' at v2
+      store.setVersions({ rootNs: 'v2' });
+      const p2a = store.loadNamespace('en', 'rootNs', { keyPrefix: 'a' });
+      const p2Theme = store.loadNamespace('en', 'rootNs', { keyPrefix: 'settings.theme' });
+      await Promise.resolve();
+
+      // Batch 2 resolves first
+      resolveV2({
+        a: { text: 'a-v2' },
+        settings: { theme: 'dark-v2' },
+      });
+      await Promise.all([p2a, p2Theme]);
+
+      expect(store.translate('rootNs', 'a.text')).toBe('a-v2');
+      expect(store.translate('rootNs', 'settings.theme')).toBe('dark-v2');
+
+      // Batch 1 resolves last (out-of-order)
+      resolveV1({
+        a: { text: 'a-v1' },
+        b: { text: 'b-v1' },
+        settings: { theme: 'light-v1', lang: 'en-v1' },
+      });
+      await Promise.all([p1a, p1b, p1Theme, p1Lang]);
+
+      // Newer v2 prefixes stay intact; non-superseded v1 prefixes are merged
+      expect(store.translate('rootNs', 'a.text')).toBe('a-v2');
+      expect(store.translate('rootNs', 'settings.theme')).toBe('dark-v2');
+      expect(store.translate('rootNs', 'b.text')).toBe('b-v1');
+      expect(store.translate('rootNs', 'settings.lang')).toBe('en-v1');
+
+      expect(store.getState().partialVersions.en?.rootNs?.a).toBe('v2');
+      expect(store.getState().partialVersions.en?.rootNs?.['settings.theme']).toBe('v2');
+      expect(store.getState().partialVersions.en?.rootNs?.b).toBe('v1');
+      expect(store.getState().partialVersions.en?.rootNs?.['settings.lang']).toBe('v1');
+    });
   });
 });
