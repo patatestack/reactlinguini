@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getNestedValue, interpolate, detectBrowserLanguage } from '../utils';
+import { describe, it, expect, afterEach } from 'vitest';
+import { getNestedValue, interpolate, detectBrowserLanguage, deepMerge, setNestedValue } from '../utils';
 
 describe('utils', () => {
   describe('getNestedValue', () => {
@@ -26,6 +26,17 @@ describe('utils', () => {
       expect(getNestedValue(obj, 'missing')).toBeUndefined();
       expect(getNestedValue(obj, 'key.nested')).toBeUndefined();
       expect(getNestedValue(undefined, 'key')).toBeUndefined();
+    });
+
+    it('resolves array indices and arrays of objects using dot notation', () => {
+      const obj = {
+        items: ['First', 'Second'],
+        cards: [{ title: 'Alpha' }, { title: 'Beta', meta: { author: 'Ada' } }],
+      };
+      expect(getNestedValue(obj, 'items.0')).toBe('First');
+      expect(getNestedValue(obj, 'cards.1.title')).toBe('Beta');
+      expect(getNestedValue(obj, 'cards.1.meta.author')).toBe('Ada');
+      expect(getNestedValue(obj, 'cards.5.title')).toBeUndefined();
     });
   });
 
@@ -92,6 +103,66 @@ describe('utils', () => {
       // @ts-ignore
       global.navigator = { languages: ['es-ES', 'de-DE'], language: 'es-ES' };
       expect(detectBrowserLanguage(['en', 'fr'], 'en')).toBe('en');
+    });
+  });
+
+  describe('deepMerge', () => {
+    it('deeply merges nested objects without mutating target or source', () => {
+      const target = {
+        header: { title: 'Old', subtitle: 'Keep' },
+        tags: ['a', 'b'],
+      };
+      const source = {
+        header: { title: 'New', extra: 'Added' },
+        footer: { copyright: '2026' },
+        tags: ['c'],
+      };
+
+      const merged = deepMerge(target, source);
+      expect(merged).toEqual({
+        header: { title: 'New', subtitle: 'Keep', extra: 'Added' },
+        footer: { copyright: '2026' },
+        tags: ['c'],
+      });
+      // Original objects remain unmutated
+      expect(target.header.title).toBe('Old');
+      expect((target as any).footer).toBeUndefined();
+      expect(target.tags).toEqual(['a', 'b']);
+    });
+
+    it('ignores prototype pollution keys', () => {
+      const malicious = JSON.parse('{"__proto__":{"polluted":true},"safe":"ok"}');
+      const merged = deepMerge({}, malicious);
+      expect(merged).toEqual({ safe: 'ok' });
+      expect(({} as any).polluted).toBeUndefined();
+    });
+  });
+
+  describe('setNestedValue', () => {
+    it('sets flat and dotted paths immutably', () => {
+      const original = { existing: { a: '1' } };
+      const next = setNestedValue(original, 'dashboard.settings.theme', 'Dark');
+      expect(next).toEqual({
+        existing: { a: '1' },
+        dashboard: { settings: { theme: 'Dark' } },
+      });
+      expect((original as any).dashboard).toBeUndefined();
+    });
+
+    it('deep-merges when existing leaf and new value are plain objects', () => {
+      const original = { settings: { theme: 'Dark', keep: 'Yes' } };
+      const next = setNestedValue(original, 'settings', { theme: 'Light', lang: 'EN' });
+      expect(next).toEqual({
+        settings: { theme: 'Light', keep: 'Yes', lang: 'EN' },
+      });
+      expect(original.settings.theme).toBe('Dark');
+    });
+
+    it('ignores prototype pollution segments', () => {
+      const original = { a: 1 };
+      const next = setNestedValue(original, '__proto__.polluted', true);
+      expect(next).toEqual({ a: 1 });
+      expect(({} as any).polluted).toBeUndefined();
     });
   });
 });

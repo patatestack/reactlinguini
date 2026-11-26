@@ -1,10 +1,17 @@
-import { LinguiniConfig, KeyOfNamespace, UseTranslationResult } from './types';
+import {
+  LinguiniConfig,
+  NamespaceConfig,
+  ResolveLinguiniSchema,
+  KeyOfNamespace,
+  UseTranslationOptions,
+  UseTranslationResult,
+} from './types';
 import { createLinguiniStore } from './store';
 import { LinguiniProvider, useTranslation } from './context';
 import React from 'react';
 
 export * from './types';
-export { getNestedValue, interpolate, detectBrowserLanguage } from './utils';
+export { getNestedValue, interpolate, detectBrowserLanguage, deepMerge, setNestedValue } from './utils';
 export { createLinguiniStore } from './store';
 export {
   LinguiniProvider,
@@ -19,18 +26,24 @@ export {
  * Returns the store, a pre-configured provider, and bound hooks.
  */
 export function createLinguini<
-  Schema extends Record<string, Record<string, any>> = Record<string, Record<string, any>>
->(config: LinguiniConfig) {
+  Schema extends Record<string, Record<string, any>> | undefined = undefined,
+  Namespaces extends Record<string, NamespaceConfig> = Record<string, NamespaceConfig>
+>(config: LinguiniConfig<Namespaces>) {
   const store = createLinguiniStore(config);
+  type ResolvedSchema = ResolveLinguiniSchema<Schema, Namespaces>;
   
   const BoundLinguiniProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     return React.createElement(LinguiniProvider, { store, children });
   };
 
-  const useTranslationBound = <NS extends keyof Schema>(
-    namespaces: NS | NS[]
-  ): UseTranslationResult<KeyOfNamespace<Schema, NS>> => {
-    return useTranslation<Schema, NS>(namespaces);
+  const useTranslationBound = <
+    NS extends (keyof ResolvedSchema & string) | (string & {}),
+    KP extends string | undefined = undefined
+  >(
+    namespaces: NS | NS[],
+    options?: UseTranslationOptions<KP>
+  ): UseTranslationResult<KeyOfNamespace<ResolvedSchema, NS, KP>> => {
+    return useTranslation<ResolvedSchema, NS, KP>(namespaces, options);
   };
 
   return {

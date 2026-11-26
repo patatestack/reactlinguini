@@ -165,4 +165,126 @@ describe('React Integration Hooks', () => {
       expect(mockLoader).toHaveBeenCalledWith('fr', 'common', { version: '1.2.3' });
     });
   });
+
+  describe('partial namespace loading and keyPrefix scoping', () => {
+    it('batches keyPrefixes across sibling/mapped child components into a single loader call per language', async () => {
+      const partialLoader = vi.fn().mockImplementation(async (lang, _ns, options) => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (lang === 'en') {
+          return {
+            header: { title: 'Dashboard EN' },
+            settings: { theme: 'Theme EN' },
+          };
+        }
+        if (lang === 'fr') {
+          const out: Record<string, any> = {};
+          if (options?.keyPrefixes?.includes('header')) {
+            out.header = { title: 'Tableau de bord' };
+          }
+          if (options?.keyPrefixes?.includes('settings')) {
+            out.settings = { theme: 'Thème' };
+          }
+          return out;
+        }
+        return {};
+      });
+
+      const partialLinguini = createLinguini<{
+        dashboard: {
+          header: { title: string };
+          settings: { theme: string };
+        };
+      }>({
+        supportedLanguages: ['en', 'fr'],
+        defaultLanguage: 'en',
+        namespaces: {
+          dashboard: { partial: true },
+        },
+        loader: partialLoader,
+      });
+
+      const Header = () => {
+        const { t, ready } = partialLinguini.useTranslation('dashboard', { keyPrefix: 'header' });
+        const status = useNamespaceStatus('dashboard', 'header');
+        if (!ready) return <div data-testid="header">loading-{status}</div>;
+        return <div data-testid="header">{t('title')} ({status})</div>;
+      };
+
+      const Settings = () => {
+        const { t, ready } = partialLinguini.useTranslation('dashboard', { keyPrefix: 'settings' });
+        if (!ready) return <div data-testid="settings">loading</div>;
+        return <div data-testid="settings">{t('theme')}</div>;
+      };
+
+      const SharedCard = ({ idx }: { idx: number }) => {
+        const { t, ready } = partialLinguini.useTranslation('dashboard', { keyPrefix: 'settings' });
+        return <div data-testid={`card-${idx}`}>{ready ? t('theme') : 'loading'}</div>;
+      };
+
+      render(
+        <partialLinguini.LinguiniProvider>
+          <Header />
+          <Settings />
+          {[1, 2].map((idx) => (
+            <SharedCard key={idx} idx={idx} />
+          ))}
+        </partialLinguini.LinguiniProvider>
+      );
+
+      expect(screen.getByTestId('header').textContent).toBe('loading-loading');
+      expect(screen.getByTestId('settings').textContent).toBe('loading');
+
+      await waitFor(() => {
+        expect(screen.getByTestId('header').textContent).toBe('Tableau de bord (loaded)');
+      });
+
+      expect(screen.getByTestId('settings').textContent).toBe('Thème');
+      // Check exact loader calls: 1 call for 'fr' and 1 call for 'en', both batched with ['header', 'settings']
+      expect(partialLoader).toHaveBeenCalledTimes(2);
+      expect(partialLoader).toHaveBeenCalledWith('fr', 'dashboard', {
+        version: undefined,
+        keyPrefixes: ['header', 'settings'],
+      });
+      expect(partialLoader).toHaveBeenCalledWith('en', 'dashboard', {
+        version: undefined,
+        keyPrefixes: ['header', 'settings'],
+      });
+      expect(screen.getByTestId('card-1').textContent).toBe('Thème');
+      expect(screen.getByTestId('card-2').textContent).toBe('Thème');
+    });
+
+    it('scopes t() with keyPrefix on non-partial namespaces while loading full namespace', async () => {
+      const fullLoader = vi.fn().mockImplementation(async (lang) => {
+        if (lang === 'fr') return { profile: { greeting: 'Bonjour {name}' } };
+        return { profile: { greeting: 'Hello {name}' } };
+      });
+
+      const fullLinguini = createLinguini<{
+        common: { profile: { greeting: string } };
+      }>({
+        supportedLanguages: ['en', 'fr'],
+        defaultLanguage: 'en',
+        loader: fullLoader,
+      });
+
+      const Profile = () => {
+        const { t, ready } = fullLinguini.useTranslation('common', { keyPrefix: 'profile' });
+        if (!ready) return <div data-testid="profile">loading</div>;
+        return <div data-testid="profile">{t('greeting', { name: 'Claire' })}</div>;
+      };
+
+      render(
+        <fullLinguini.LinguiniProvider>
+          <Profile />
+        </fullLinguini.LinguiniProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('profile').textContent).toBe('Bonjour Claire');
+      });
+
+      expect(fullLoader).toHaveBeenCalledWith('fr', 'common', { version: undefined });
+      expect(fullLoader).toHaveBeenCalledWith('en', 'common', { version: undefined });
+    });
+  });
 });
