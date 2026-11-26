@@ -7,30 +7,125 @@ function isPlainObject(value: unknown): value is Record<string, any> {
 /**
  * Immutably deep-merges `source` into `target`. Plain objects are merged recursively;
  * primitives and arrays from `source` overwrite `target`.
+ * Preserves exact object references for `target` and untouched sibling subtrees when unchanged.
  */
 export function deepMerge(
   target: Record<string, any> | undefined,
   source: Record<string, any>
 ): Record<string, any> {
-  const result: Record<string, any> = isPlainObject(target) ? { ...target } : {};
-
+  const hasTarget = isPlainObject(target);
   if (!isPlainObject(source)) {
-    return result;
+    return hasTarget ? target : {};
   }
 
-  for (const key of Object.keys(source)) {
+  let result: Record<string, any> | undefined;
+
+  for (const key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
     if (UNSAFE_KEYS.has(key)) continue;
+
     const sourceVal = source[key];
-    const targetVal = result[key];
+    const targetVal = hasTarget ? target[key] : undefined;
 
     if (isPlainObject(sourceVal)) {
-      result[key] = deepMerge(isPlainObject(targetVal) ? targetVal : undefined, sourceVal);
+      const mergedChild = deepMerge(isPlainObject(targetVal) ? targetVal : undefined, sourceVal);
+      if (!hasTarget || !isPlainObject(targetVal) || mergedChild !== targetVal) {
+        if (!result) result = hasTarget ? { ...target } : {};
+        result[key] = mergedChild;
+      }
     } else {
-      result[key] = sourceVal;
+      if (!hasTarget || !Object.is(targetVal, sourceVal) || !(key in target)) {
+        if (!result) result = hasTarget ? { ...target } : {};
+        result[key] = sourceVal;
+      }
     }
   }
 
-  return result;
+  return result ?? (hasTarget ? target : {});
+}
+
+/**
+ * Immutably sets multiple dot-notated path entries in a nested object in one pass.
+ * Clones the root and each visited intermediate container at most once per batch.
+ */
+export function setNestedValues(
+  target: Record<string, any> | undefined,
+  entries: Record<string, any>
+): Record<string, any> {
+  const hasTarget = isPlainObject(target);
+  if (!isPlainObject(entries)) {
+    return hasTarget ? target : {};
+  }
+
+  let base: Record<string, any> | undefined;
+  const cloned = new WeakSet<object>();
+
+  const ensureBase = (): Record<string, any> => {
+    if (!base) {
+      base = hasTarget ? { ...target } : {};
+      cloned.add(base);
+    }
+    return base;
+  };
+
+  for (const path in entries) {
+    if (!Object.prototype.hasOwnProperty.call(entries, path)) continue;
+    const value = entries[path];
+
+    if (!path) {
+      if (isPlainObject(value)) {
+        const currentBase = ensureBase();
+        const merged = deepMerge(currentBase, value);
+        if (merged !== currentBase) {
+          base = merged;
+          cloned.add(base);
+        }
+      }
+      continue;
+    }
+
+    const parts = path.split('.');
+    if (parts.some((part) => !part || UNSAFE_KEYS.has(part))) {
+      continue;
+    }
+
+    let current = ensureBase();
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      const existing = current[part];
+      if (isPlainObject(existing)) {
+        if (!cloned.has(existing)) {
+          const copy = { ...existing };
+          cloned.add(copy);
+          current[part] = copy;
+          current = copy;
+        } else {
+          current = existing;
+        }
+      } else {
+        const next: Record<string, any> = {};
+        cloned.add(next);
+        current[part] = next;
+        current = next;
+      }
+    }
+
+    const leaf = parts[parts.length - 1];
+    const existingLeaf = current[leaf];
+    if (isPlainObject(existingLeaf) && isPlainObject(value)) {
+      const mergedLeaf = deepMerge(existingLeaf, value);
+      current[leaf] = mergedLeaf;
+      cloned.add(mergedLeaf);
+    } else if (isPlainObject(value)) {
+      const copyLeaf = deepMerge(undefined, value);
+      current[leaf] = copyLeaf;
+      cloned.add(copyLeaf);
+    } else {
+      current[leaf] = value;
+    }
+  }
+
+  return base ?? (hasTarget ? target : {});
 }
 
 /**

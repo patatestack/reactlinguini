@@ -129,4 +129,35 @@ describe('TypeScript per-namespace type inference', () => {
       UseTranslationResult<'author'>
     >();
   });
+
+  it('supports defaultValue overloads and new config/store options in types', () => {
+    const linguini = createLinguini({
+      supportedLanguages: ['en', 'fr'],
+      defaultLanguage: 'en',
+      fallbackLoadStrategy: 'onMissing',
+      missingKeyFallback: (_ns, key) => key,
+      nsSeparator: false,
+      retry: { maxRetries: 2, retryDelay: (attempt) => attempt * 100 },
+      namespaces: {
+        common: {
+          fallbackLoadStrategy: 'onError',
+          retry: 1,
+          loader: async () => ({ greeting: 'Hello {name}' }),
+        },
+      },
+    });
+
+    type CommonResult = ReturnType<typeof linguini.useTranslation<'common'>>;
+    type TFunc = CommonResult['t'];
+
+    const checkCalls = (t: TFunc) => {
+      const a: string = t('greeting');
+      const b: string = t('greeting', { name: 'Ada', defaultValue: 'Hi' });
+      const c: string = t('greeting', 'Default Hi');
+      const d: string = t('greeting', 'Default {name}', { name: 'Ada' });
+      return [a, b, c, d];
+    };
+    expectTypeOf(checkCalls).returns.toEqualTypeOf<string[]>();
+    expectTypeOf<typeof linguini.store.setVersions>().toBeCallableWith({ common: '2.0.0' }, { replace: true });
+  });
 });

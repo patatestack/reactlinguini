@@ -1,17 +1,19 @@
 # React Linguini 🍝
 
-A lightweight (~3.1 KB gzipped), zero-dependency, headless internationalization (i18n) library for React built around **component-driven translation splitting** — load namespaces and even partial namespace slices only where components mount, with per-namespace loaders, skeleton-ready states, language fallbacks, and scoped TypeScript autocomplete.
+A lightweight (~5 KB gzipped), zero-dependency, headless internationalization (i18n) library for React built around **component-driven translation splitting** — load namespaces and even partial namespace slices only where components mount, with per-namespace loaders, skeleton-ready states, language fallbacks, and scoped TypeScript autocomplete.
 
 ## Why React Linguini?
 
 - **Component-Driven Translation Splitting**: Unlike i18n setups that eagerly download monolithic locale bundles upfront, React Linguini fetches each namespace—and optionally only the `keyPrefix` slice a component actually renders—on demand when components mount.
+- **Scoped Subscriptions & Stable `t`**: `useTranslation`, `useLanguage`, and `useNamespaceStatus` subscribe only to their own namespace/prefix slices and statuses, preventing unrelated re-renders and preserving `t` function identity across other namespace loads.
 - **Automatic Batching & Deduplication**: Multiple sibling or `.map()` child components requesting different `keyPrefix` values from a partial namespace in the same render pass are automatically batched into a single `loader` call, while shared prefixes are deduplicated.
 - **Per-Namespace Loaders**: Point different namespaces at completely different sources (e.g., static JSON/dynamic `import()` for `common`, a CMS or REST endpoint for `catalog`, an authenticated API for `admin`) without writing a monolithic `switch (ns)` inside one global loader.
 - **Built for Skeletons (`ready` & `status`)**: Every `useTranslation` call exposes `ready`, `status` (`idle` | `loading` | `loaded` | `error`), and `error` scoped to the exact namespace(s) or `keyPrefix` the component depends on.
 - **Zero Runtime Dependencies**: Built natively on React 18/19's `useSyncExternalStore`.
-- **Default & Fallback Languages**: Automatically cascades missing keys to your `defaultLanguage` (and optional `fallbackLanguage`).
+- **Configurable Fallback Loading (`fallbackLoadStrategy`)**: Choose `'eager'` (default), `'onError'` (only load default/fallback if active fails), or `'onMissing'` (lazily load fallback only when a rendered key is missing in the active language).
+- **Default Values & Missing Key Fallbacks**: Pass `defaultValue` inline (`t('key', 'Fallback')` or `t('key', { defaultValue: 'Fallback' })`), configure global `missingKeyFallback`, and optionally disable `:` namespace splitting via `nsSeparator: false`.
 - **Browser Language Detection**: 3-level regional dialect matching (e.g., `fr-CA` -> `fr` -> `fr-FR` -> `defaultLanguage`) with manual override support.
-- **Namespace Versioning & Cache Busting**: Configure per-namespace versions and dynamically force-refresh namespaces or partial prefixes at runtime.
+- **Version-Aware Caching & `setVersions()`**: Versioned caching (including per-prefix partial tracking), race protection, automatic retries (`retry`), and `store.setVersions()` with stale-while-revalidate refetching for mounted components.
 - **Scoped TypeScript Intellisense**: Pass your translation schema generic for dot-notation key autocomplete, automatically narrowed to the active `keyPrefix` subtree when provided.
 
 ## Installation
@@ -114,7 +116,28 @@ Because `store` is returned directly from `createLinguini`, you can read or chan
 import { store } from './i18n';
 
 store.setLanguage('fr');
-await store.refreshNamespace('common', { version: '2.0.0' });
+// Update target versions dynamically (e.g., from an API manifest):
+// mounted hooks refetch stale namespaces while keeping old translations visible
+store.setVersions({ common: '2.0.0', catalog: '1.4.0' });
+await store.refreshNamespace('common', { version: '2.0.1' });
+```
+
+### Runtime Options: Fallbacks, Default Values, Separators & Retries
+
+```ts
+createLinguini({
+  supportedLanguages: ['en', 'fr'],
+  defaultLanguage: 'en',
+  fallbackLoadStrategy: 'onMissing', // 'eager' (default) | 'onError' | 'onMissing'
+  missingKeyFallback: '',            // string or (ns, key) => string
+  nsSeparator: false,                // allow ':' inside translation keys
+  retry: { maxRetries: 2, retryDelay: (attempt) => attempt * 200 },
+  loader,
+});
+
+// Inline default values with optional interpolation
+t('greeting', 'Hello {name}', { name: 'Ada' });
+t('greeting', { defaultValue: 'Hello {name}', name: 'Ada' });
 ```
 
 ### Per-Namespace Loaders & Partial Namespace Loading (Optional)

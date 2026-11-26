@@ -1,18 +1,28 @@
 import {
   LinguiniConfig,
+  LinguiniLoader,
   LinguiniState,
   LinguiniStore,
   LoadNamespaceOptions,
   NamespaceLoadingStatus,
   RefreshNamespaceOptions,
+  RetryConfig,
+  SetVersionsOptions,
+  TranslateParams,
 } from './types';
-import { getNestedValue, interpolate, detectBrowserLanguage, deepMerge, setNestedValue } from './utils';
+import {
+  getNestedValue,
+  interpolate,
+  detectBrowserLanguage,
+  deepMerge,
+  setNestedValues,
+} from './utils';
 
 interface PendingBatch {
   lang: string;
   ns: string;
   version: string | undefined;
-  prefixes: Set<string>;
+  prefixes: Map<string, number>;
   promise: Promise<void>;
   resolve: () => void;
   reject: (err: any) => void;
@@ -22,18 +32,32 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
   // Determine initial language: use detected browser language or default
   const initialLang = detectBrowserLanguage(config.supportedLanguages, config.defaultLanguage);
 
+  const initialTargetVersions: Record<string, string> = { ...(config.versions || {}) };
+  if (config.namespaces) {
+    for (const ns of Object.keys(config.namespaces)) {
+      const nsVersion = config.namespaces[ns]?.version;
+      if (nsVersion !== undefined) {
+        initialTargetVersions[ns] = nsVersion;
+      }
+    }
+  }
+
   let state: LinguiniState = {
     language: initialLang,
     translations: {},
     loadingStates: {},
     partialLoadingStates: {},
     versions: {},
+    partialVersions: {},
+    targetVersions: initialTargetVersions,
   };
 
   const listeners = new Set<() => void>();
-  const activePromises = new Map<string, Promise<void>>(); // key: "lang:ns"
-  const activePartialPromises = new Map<string, Promise<void>>(); // key: "lang\0ns\0prefix"
+  const activePromises = new Map<string, Promise<void>>(); // key: "lang\0ns\0version"
+  const activePartialPromises = new Map<string, Promise<void>>(); // key: "lang\0ns\0prefix\0version"
   const pendingBatches = new Map<string, PendingBatch>(); // key: "lang\0ns\0version"
+  const fullRequestSeq = new Map<string, number>(); // key: "lang\0ns"
+  const partialRequestSeq = new Map<string, number>(); // key: "lang\0ns\0prefix"
 
   function updateState(newState: Partial<LinguiniState>) {
     state = { ...state, ...newState };
@@ -41,15 +65,50 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
   }
 
   function resolveVersion(ns: string, overrideVersion?: string): string | undefined {
-    return overrideVersion ?? config.namespaces?.[ns]?.version ?? config.versions?.[ns] ?? config.defaultVersion;
+    return overrideVersion ?? state.targetVersions[ns] ?? config.defaultVersion;
   }
 
-  function resolveLoader(ns: string) {
+  function resolveLoader(ns: string): LinguiniLoader {
     const loader = config.namespaces?.[ns]?.loader ?? config.loader;
     if (!loader) {
       throw new Error(`Linguini: No loader configured for namespace "${ns}"`);
     }
     return loader;
+  }
+
+  function resolveRetryConfig(ns: string): RetryConfig | undefined {
+    const raw = config.namespaces?.[ns]?.retry ?? config.retry;
+    if (raw === undefined || raw === 0) return undefined;
+    if (typeof raw === 'number') {
+      return raw > 0 ? { maxRetries: raw } : undefined;
+    }
+    return raw.maxRetries > 0 ? raw : undefined;
+  }
+
+  async function executeWithRetry<T>(
+    fn: () => Promise<T>,
+    retryConfig?: RetryConfig
+  ): Promise<T> {
+    const maxRetries = retryConfig?.maxRetries ?? 0;
+    let attempt = 0;
+
+    while (true) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (attempt >= maxRetries) {
+          throw error;
+        }
+        attempt++;
+        const delay =
+          typeof retryConfig?.retryDelay === 'function'
+            ? retryConfig.retryDelay(attempt, error)
+            : (retryConfig?.retryDelay ?? 300) * Math.pow(2, attempt - 1);
+        if (delay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
   }
 
   function updateLoadingState(lang: string, ns: string, status: NamespaceLoadingStatus) {
@@ -94,67 +153,126 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
     pendingBatches.delete(bucketKey);
 
     const { lang, ns, version, prefixes, promise, resolve, reject } = batch;
-    const keyPrefixes = Array.from(prefixes);
+    const versionStr = version ?? '';
+    const keyPrefixes = Array.from(prefixes.keys());
 
     try {
       const loader = resolveLoader(ns);
-      const data = await loader(lang, ns, { version, keyPrefixes });
-      const strategy =
-        config.namespaces?.[ns]?.partialMergeStrategy ??
-        config.partialMergeStrategy ??
-        'root';
+      const retryConfig = resolveRetryConfig(ns);
+      const data = await executeWithRetry(
+        () => loader(lang, ns, { version, keyPrefixes }),
+        retryConfig
+      );
 
-      let mergedTranslations: Record<string, any>;
-      if (strategy === 'subtree') {
-        mergedTranslations = state.translations[lang]?.[ns] || {};
-        for (const [prefix, val] of Object.entries(data || {})) {
-          mergedTranslations = setNestedValue(mergedTranslations, prefix, val);
+      const currentPrefixes = keyPrefixes.filter(
+        (prefix) => partialRequestSeq.get(`${lang}\0${ns}\0${prefix}`) === prefixes.get(prefix)
+      );
+
+      if (currentPrefixes.length > 0) {
+        const strategy =
+          config.namespaces?.[ns]?.partialMergeStrategy ??
+          config.partialMergeStrategy ??
+          'root';
+
+        let mergedTranslations: Record<string, any>;
+        if (strategy === 'subtree') {
+          let filteredData: Record<string, any>;
+          if (currentPrefixes.length === keyPrefixes.length) {
+            filteredData = data || {};
+          } else {
+            filteredData = {};
+            const currentSet = new Set(currentPrefixes);
+            for (const [k, v] of Object.entries(data || {})) {
+              if (currentSet.has(k)) {
+                filteredData[k] = v;
+              }
+            }
+          }
+          mergedTranslations = setNestedValues(state.translations[lang]?.[ns], filteredData);
+        } else {
+          mergedTranslations = deepMerge(state.translations[lang]?.[ns], data || {});
         }
-      } else {
-        mergedTranslations = deepMerge(state.translations[lang]?.[ns], data || {});
+
+        const langPartialStates = state.partialLoadingStates[lang] || {};
+        const nsPartialStates = { ...(langPartialStates[ns] || {}) };
+        const langPartialVersions = state.partialVersions[lang] || {};
+        const nsPartialVersions = { ...(langPartialVersions[ns] || {}) };
+
+        for (const prefix of currentPrefixes) {
+          nsPartialStates[prefix] = 'loaded';
+          nsPartialVersions[prefix] = versionStr;
+        }
+
+        const nextState: Partial<LinguiniState> = {
+          translations: {
+            ...state.translations,
+            [lang]: {
+              ...(state.translations[lang] || {}),
+              [ns]: mergedTranslations,
+            },
+          },
+          partialLoadingStates: {
+            ...state.partialLoadingStates,
+            [lang]: {
+              ...langPartialStates,
+              [ns]: nsPartialStates,
+            },
+          },
+          partialVersions: {
+            ...state.partialVersions,
+            [lang]: {
+              ...langPartialVersions,
+              [ns]: nsPartialVersions,
+            },
+          },
+        };
+
+        // Keep full loadingStates/versions consistent if a full load occurred at an older version
+        if (
+          state.loadingStates[lang]?.[ns] === 'loaded' &&
+          state.versions[lang]?.[ns] !== versionStr
+        ) {
+          nextState.loadingStates = {
+            ...state.loadingStates,
+            [lang]: {
+              ...(state.loadingStates[lang] || {}),
+              [ns]: 'idle',
+            },
+          };
+          nextState.versions = {
+            ...state.versions,
+            [lang]: {
+              ...(state.versions[lang] || {}),
+              [ns]: versionStr,
+            },
+          };
+        } else if (state.loadingStates[lang]?.[ns] !== 'loaded') {
+          nextState.versions = {
+            ...state.versions,
+            [lang]: {
+              ...(state.versions[lang] || {}),
+              [ns]: versionStr,
+            },
+          };
+        }
+
+        updateState(nextState);
       }
 
-      const langPartialStates = state.partialLoadingStates[lang] || {};
-      const nsPartialStates = { ...(langPartialStates[ns] || {}) };
       for (const prefix of keyPrefixes) {
-        nsPartialStates[prefix] = 'loaded';
-      }
-
-      updateState({
-        translations: {
-          ...state.translations,
-          [lang]: {
-            ...(state.translations[lang] || {}),
-            [ns]: mergedTranslations,
-          },
-        },
-        partialLoadingStates: {
-          ...state.partialLoadingStates,
-          [lang]: {
-            ...langPartialStates,
-            [ns]: nsPartialStates,
-          },
-        },
-        versions: {
-          ...state.versions,
-          [lang]: {
-            ...(state.versions[lang] || {}),
-            [ns]: version || '',
-          },
-        },
-      });
-
-      for (const prefix of keyPrefixes) {
-        const prefixKey = `${lang}\0${ns}\0${prefix}`;
+        const prefixKey = `${lang}\0${ns}\0${prefix}\0${versionStr}`;
         if (activePartialPromises.get(prefixKey) === promise) {
           activePartialPromises.delete(prefixKey);
         }
       }
       resolve();
     } catch (error) {
-      updatePartialLoadingStates(lang, ns, keyPrefixes, 'error');
+      const currentPrefixes = keyPrefixes.filter(
+        (prefix) => partialRequestSeq.get(`${lang}\0${ns}\0${prefix}`) === prefixes.get(prefix)
+      );
+      updatePartialLoadingStates(lang, ns, currentPrefixes, 'error');
       for (const prefix of keyPrefixes) {
-        const prefixKey = `${lang}\0${ns}\0${prefix}`;
+        const prefixKey = `${lang}\0${ns}\0${prefix}\0${versionStr}`;
         if (activePartialPromises.get(prefixKey) === promise) {
           activePartialPromises.delete(prefixKey);
         }
@@ -165,7 +283,7 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
 
   const store: LinguiniStore = {
     config,
-    
+
     getState() {
       return state;
     },
@@ -185,6 +303,21 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
       updateState({ language: lang });
     },
 
+    setVersions(versions: Record<string, string>, options?: SetVersionsOptions) {
+      const nextTargetVersions = options?.replace
+        ? { ...versions }
+        : { ...state.targetVersions, ...versions };
+
+      const prevKeys = Object.keys(state.targetVersions);
+      const nextKeys = Object.keys(nextTargetVersions);
+      const changed =
+        prevKeys.length !== nextKeys.length ||
+        nextKeys.some((k) => state.targetVersions[k] !== nextTargetVersions[k]);
+
+      if (!changed) return;
+      updateState({ targetVersions: nextTargetVersions });
+    },
+
     loadNamespace(lang: string, ns: string, options?: LoadNamespaceOptions): Promise<void> {
       const requestedPrefixesSet = new Set<string>();
       if (options?.keyPrefixes) {
@@ -198,12 +331,15 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
       const requestedPrefixes = Array.from(requestedPrefixesSet);
       const isPartial = Boolean(config.namespaces?.[ns]?.partial && requestedPrefixes.length > 0);
       const force = options?.forceRefresh;
+      const version = resolveVersion(ns, options?.version);
+      const versionStr = version ?? '';
 
       if (!isPartial) {
-        const key = `${lang}:${ns}`;
+        const key = `${lang}\0${ns}\0${versionStr}`;
         const status = state.loadingStates[lang]?.[ns] || 'idle';
+        const loadedVersion = state.versions[lang]?.[ns];
 
-        if (status === 'loaded' && !force) {
+        if (status === 'loaded' && loadedVersion === versionStr && !force) {
           return Promise.resolve();
         }
 
@@ -212,13 +348,25 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
           return existingPromise;
         }
 
-        const promise = (async () => {
+        const seqKey = `${lang}\0${ns}`;
+        const mySeq = (fullRequestSeq.get(seqKey) ?? 0) + 1;
+        fullRequestSeq.set(seqKey, mySeq);
+
+        let promise!: Promise<void>;
+        promise = (async () => {
           updateLoadingState(lang, ns, 'loading');
           try {
-            const version = resolveVersion(ns, options?.version);
             const loader = resolveLoader(ns);
-            const data = await loader(lang, ns, { version });
-            
+            const retryConfig = resolveRetryConfig(ns);
+            const data = await executeWithRetry(
+              () => loader(lang, ns, { version }),
+              retryConfig
+            );
+
+            if (fullRequestSeq.get(seqKey) !== mySeq) {
+              return;
+            }
+
             updateState({
               translations: {
                 ...state.translations,
@@ -238,15 +386,19 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
                 ...state.versions,
                 [lang]: {
                   ...(state.versions[lang] || {}),
-                  [ns]: version || '',
+                  [ns]: versionStr,
                 },
               },
             });
           } catch (error) {
-            updateLoadingState(lang, ns, 'error');
+            if (fullRequestSeq.get(seqKey) === mySeq) {
+              updateLoadingState(lang, ns, 'error');
+            }
             throw error;
           } finally {
-            activePromises.delete(key);
+            if (activePromises.get(key) === promise) {
+              activePromises.delete(key);
+            }
           }
         })();
 
@@ -255,14 +407,23 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
       }
 
       // Partial load path
-      if (!force && state.loadingStates[lang]?.[ns] === 'loaded') {
+      if (
+        !force &&
+        state.loadingStates[lang]?.[ns] === 'loaded' &&
+        state.versions[lang]?.[ns] === versionStr
+      ) {
         return Promise.resolve();
       }
 
       const nsPartialStates = state.partialLoadingStates[lang]?.[ns];
+      const nsPartialVersions = state.partialVersions[lang]?.[ns];
       const pendingPrefixes = force
         ? requestedPrefixes
-        : requestedPrefixes.filter((prefix) => nsPartialStates?.[prefix] !== 'loaded');
+        : requestedPrefixes.filter(
+            (prefix) =>
+              nsPartialStates?.[prefix] !== 'loaded' ||
+              nsPartialVersions?.[prefix] !== versionStr
+          );
 
       if (pendingPrefixes.length === 0) {
         return Promise.resolve();
@@ -273,7 +434,7 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
       const toQueue: string[] = [];
 
       for (const prefix of pendingPrefixes) {
-        const prefixKey = `${lang}\0${ns}\0${prefix}`;
+        const prefixKey = `${lang}\0${ns}\0${prefix}\0${versionStr}`;
         const inFlight = !force ? activePartialPromises.get(prefixKey) : undefined;
         if (inFlight) {
           if (!seenExisting.has(inFlight)) {
@@ -293,8 +454,7 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
 
       updatePartialLoadingStates(lang, ns, toQueue, 'loading');
 
-      const version = resolveVersion(ns, options?.version);
-      const bucketKey = `${lang}\0${ns}\0${version ?? ''}`;
+      const bucketKey = `${lang}\0${ns}\0${versionStr}`;
       let batch = pendingBatches.get(bucketKey);
 
       if (!batch) {
@@ -309,7 +469,7 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
           lang,
           ns,
           version,
-          prefixes: new Set<string>(),
+          prefixes: new Map<string, number>(),
           promise,
           resolve,
           reject,
@@ -321,8 +481,11 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
       }
 
       for (const prefix of toQueue) {
-        batch.prefixes.add(prefix);
-        activePartialPromises.set(`${lang}\0${ns}\0${prefix}`, batch.promise);
+        const seqKey = `${lang}\0${ns}\0${prefix}`;
+        const nextSeq = (partialRequestSeq.get(seqKey) ?? 0) + 1;
+        partialRequestSeq.set(seqKey, nextSeq);
+        batch.prefixes.set(prefix, nextSeq);
+        activePartialPromises.set(`${lang}\0${ns}\0${prefix}\0${versionStr}`, batch.promise);
       }
 
       if (existingPromises.length === 0) {
@@ -332,6 +495,15 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
     },
 
     async refreshNamespace(ns: string, options?: RefreshNamespaceOptions) {
+      if (options?.version !== undefined && state.targetVersions[ns] !== options.version) {
+        updateState({
+          targetVersions: {
+            ...state.targetVersions,
+            [ns]: options.version,
+          },
+        });
+      }
+
       const activeLang = state.language;
       const defaultLang = config.defaultLanguage;
       const fallbackLang = config.fallbackLanguage;
@@ -405,7 +577,23 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
       await Promise.all(promises);
     },
 
-    translate(ns: string, key: string, params?: Record<string, any>): string {
+    translate(
+      ns: string,
+      key: string,
+      paramsOrDefault?: TranslateParams | string,
+      maybeParams?: Record<string, any>
+    ): string {
+      let defaultValue: string | undefined;
+      let params: Record<string, any> | undefined;
+
+      if (typeof paramsOrDefault === 'string') {
+        defaultValue = paramsOrDefault;
+        params = maybeParams;
+      } else {
+        params = paramsOrDefault;
+        defaultValue = paramsOrDefault?.defaultValue;
+      }
+
       const activeLang = state.language;
       const defaultLang = config.defaultLanguage;
       const fallbackLang = config.fallbackLanguage;
@@ -423,8 +611,16 @@ export function createLinguiniStore(config: LinguiniConfig<any>): LinguiniStore 
         val = getNestedValue(state.translations[fallbackLang]?.[ns], key);
       }
 
-      // If not found, return missing key format
       if (val === undefined) {
+        if (defaultValue !== undefined) {
+          return interpolate(defaultValue, params);
+        }
+        if (typeof config.missingKeyFallback === 'function') {
+          return config.missingKeyFallback(ns, key);
+        }
+        if (typeof config.missingKeyFallback === 'string') {
+          return config.missingKeyFallback;
+        }
         return `${ns}:${key}`;
       }
 

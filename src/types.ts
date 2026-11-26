@@ -1,5 +1,21 @@
 export type PartialMergeStrategy = 'root' | 'subtree';
 
+export type FallbackLoadStrategy = 'eager' | 'onError' | 'onMissing';
+
+export interface RetryConfig {
+  maxRetries: number;
+  retryDelay?: number | ((attempt: number, error: unknown) => number);
+}
+
+export interface TranslateParams {
+  defaultValue?: string;
+  [key: string]: any;
+}
+
+export interface SetVersionsOptions {
+  replace?: boolean;
+}
+
 export interface LoaderOptions {
   version?: string;
   keyPrefixes?: string[];
@@ -34,6 +50,18 @@ export interface NamespaceConfig {
    * Optional namespace-specific loader. Overrides the top-level `loader`.
    */
   loader?: LinguiniLoader;
+
+  /**
+   * Controls when default/fallback languages are loaded for this namespace.
+   * Overrides the top-level `fallbackLoadStrategy`.
+   */
+  fallbackLoadStrategy?: FallbackLoadStrategy;
+
+  /**
+   * Automatic retry configuration when this namespace's loader fails.
+   * Overrides the top-level `retry`.
+   */
+  retry?: number | RetryConfig;
 }
 
 export interface LoadNamespaceOptions {
@@ -98,6 +126,32 @@ export interface LinguiniConfig<
    * Global default merge strategy for partial namespace loads (default: 'root').
    */
   partialMergeStrategy?: PartialMergeStrategy;
+
+  /**
+   * Controls when default/fallback languages are loaded (default: 'eager').
+   * - 'eager': load active, default, and fallback languages together on mount.
+   * - 'onError': load default/fallback only when loading the active language fails.
+   * - 'onMissing': load active language only, and lazily load default/fallback on demand when a key is missing.
+   */
+  fallbackLoadStrategy?: FallbackLoadStrategy;
+
+  /**
+   * Global fallback string or formatter returned when a translation key is missing and no defaultValue is passed.
+   * Defaults to `${ns}:${key}`.
+   */
+  missingKeyFallback?: string | ((ns: string, key: string) => string);
+
+  /**
+   * Separator used to split explicit namespace prefixes like `common:hello`.
+   * Set to `false` to disable namespace prefix splitting when keys contain `:`.
+   * Defaults to `':'`.
+   */
+  nsSeparator?: string | false;
+
+  /**
+   * Automatic retry configuration when a namespace loader fails.
+   */
+  retry?: number | RetryConfig;
 }
 
 /**
@@ -154,15 +208,23 @@ export interface LinguiniState {
   partialLoadingStates: Record<string, Record<string, Record<string, NamespaceLoadingStatus>>>;
   // lang -> ns -> version-string
   versions: Record<string, Record<string, string>>;
+  // lang -> ns -> prefix -> version-string
+  partialVersions: Record<string, Record<string, Record<string, string>>>;
+  // ns -> target version-string
+  targetVersions: Record<string, string>;
 }
 
 export interface LinguiniStore {
   getState: () => LinguiniState;
   subscribe: (listener: () => void) => () => void;
   setLanguage: (lang: string) => void;
+  setVersions: (versions: Record<string, string>, options?: SetVersionsOptions) => void;
   loadNamespace: (lang: string, ns: string, options?: LoadNamespaceOptions) => Promise<void>;
   refreshNamespace: (ns: string, options?: RefreshNamespaceOptions) => Promise<void>;
-  translate: (ns: string, key: string, params?: Record<string, any>) => string;
+  translate: {
+    (ns: string, key: string, params?: TranslateParams): string;
+    (ns: string, key: string, defaultValue: string, params?: Record<string, any>): string;
+  };
   config: LinguiniConfig;
 }
 
@@ -236,10 +298,10 @@ export type KeyOfNamespace<
   : string;
 
 // Key | (string & {}) allows TS autocomplete suggestions while permitting arbitrary strings
-export type TranslateFunction<Key extends string = string> = (
-  key: Key | (string & {}),
-  params?: Record<string, any>
-) => string;
+export type TranslateFunction<Key extends string = string> = {
+  (key: Key | (string & {}), params?: TranslateParams): string;
+  (key: Key | (string & {}), defaultValue: string, params?: Record<string, any>): string;
+};
 
 export interface UseTranslationResult<Key extends string = string> {
   /**

@@ -1,5 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { getNestedValue, interpolate, detectBrowserLanguage, deepMerge, setNestedValue } from '../utils';
+import {
+  getNestedValue,
+  interpolate,
+  detectBrowserLanguage,
+  deepMerge,
+  setNestedValue,
+  setNestedValues,
+} from '../utils';
 
 describe('utils', () => {
   describe('getNestedValue', () => {
@@ -68,40 +75,44 @@ describe('utils', () => {
   });
 
   describe('detectBrowserLanguage', () => {
-    const originalNavigator = global.navigator;
+    const originalNavigator = globalThis.navigator;
 
     afterEach(() => {
-      global.navigator = originalNavigator;
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+        writable: true,
+      });
     });
 
     it('falls back to default language if navigator is undefined', () => {
       // @ts-ignore
-      delete global.navigator;
+      delete globalThis.navigator;
       expect(detectBrowserLanguage(['en', 'fr'], 'en')).toBe('en');
     });
 
     it('matches exact navigator language', () => {
       // @ts-ignore
-      global.navigator = { languages: ['fr-FR', 'en-US'], language: 'fr-FR' };
+      globalThis.navigator = { languages: ['fr-FR', 'en-US'], language: 'fr-FR' };
       expect(detectBrowserLanguage(['en-US', 'fr-FR'], 'en')).toBe('fr-FR');
     });
 
     it('matches base language from language code', () => {
       // @ts-ignore
-      global.navigator = { languages: ['fr-CA', 'en-US'], language: 'fr-CA' };
+      globalThis.navigator = { languages: ['fr-CA', 'en-US'], language: 'fr-CA' };
       expect(detectBrowserLanguage(['en', 'fr'], 'en')).toBe('fr');
     });
 
     it('matches alternative regional dialect if exact match is missing', () => {
       // @ts-ignore
-      global.navigator = { languages: ['fr-CA', 'en-US'] };
+      globalThis.navigator = { languages: ['fr-CA', 'en-US'] };
       // fr-CA should match fr-FR because they share the 'fr' base language
       expect(detectBrowserLanguage(['en', 'fr-FR'], 'en')).toBe('fr-FR');
     });
 
     it('falls back to default if no matches found', () => {
       // @ts-ignore
-      global.navigator = { languages: ['es-ES', 'de-DE'], language: 'es-ES' };
+      globalThis.navigator = { languages: ['es-ES', 'de-DE'], language: 'es-ES' };
       expect(detectBrowserLanguage(['en', 'fr'], 'en')).toBe('en');
     });
   });
@@ -136,6 +147,19 @@ describe('utils', () => {
       expect(merged).toEqual({ safe: 'ok' });
       expect(({} as any).polluted).toBeUndefined();
     });
+
+    it('preserves target and untouched sibling references when unchanged', () => {
+      const sibling = { label: 'Keep' };
+      const target = { a: { text: 'Same' }, sibling };
+
+      expect(deepMerge(target, {})).toBe(target);
+      expect(deepMerge(target, { a: { text: 'Same' } })).toBe(target);
+
+      const updated = deepMerge(target, { a: { text: 'Changed' } });
+      expect(updated).not.toBe(target);
+      expect(updated.a.text).toBe('Changed');
+      expect(updated.sibling).toBe(sibling);
+    });
   });
 
   describe('setNestedValue', () => {
@@ -162,6 +186,48 @@ describe('utils', () => {
       const original = { a: 1 };
       const next = setNestedValue(original, '__proto__.polluted', true);
       expect(next).toEqual({ a: 1 });
+      expect(({} as any).polluted).toBeUndefined();
+    });
+  });
+
+  describe('setNestedValues', () => {
+    it('batches multiple dotted paths while preserving untouched sibling references', () => {
+      const untouched = { copy: '2026' };
+      const original = {
+        footer: untouched,
+        group: { existing: { label: 'Old' } },
+      };
+
+      const next = setNestedValues(original, {
+        'group.first': { text: 'One' },
+        'group.second': { text: 'Two' },
+        'group.existing': { extra: 'Added' },
+        'section.deep.item': 'Leaf',
+      });
+
+      expect(next).toEqual({
+        footer: { copy: '2026' },
+        group: {
+          existing: { label: 'Old', extra: 'Added' },
+          first: { text: 'One' },
+          second: { text: 'Two' },
+        },
+        section: { deep: { item: 'Leaf' } },
+      });
+      expect(next.footer).toBe(untouched);
+      expect((original.group as any).first).toBeUndefined();
+      expect(original.group.existing).toEqual({ label: 'Old' });
+    });
+
+    it('returns original target reference when entries is empty and ignores unsafe paths', () => {
+      const original = { a: { b: 1 } };
+      expect(setNestedValues(original, {})).toBe(original);
+
+      const safe = setNestedValues(original, {
+        '__proto__.polluted': true,
+        'constructor.prototype.x': 'bad',
+      });
+      expect(safe).toBe(original);
       expect(({} as any).polluted).toBeUndefined();
     });
   });

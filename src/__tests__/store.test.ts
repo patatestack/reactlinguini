@@ -7,7 +7,7 @@ describe('LinguiniStore', () => {
   let config: LinguiniConfig;
 
   beforeEach(() => {
-    mockLoader = vi.fn().mockImplementation(async (lang, ns, options) => {
+    mockLoader = vi.fn().mockImplementation(async (lang, ns, _options) => {
       if (lang === 'en' && ns === 'common') {
         return { welcome: 'Welcome {name}', fallbackOnly: 'English Fallback' };
       }
@@ -27,7 +27,7 @@ describe('LinguiniStore', () => {
   it('initializes with default state', () => {
     // Force browser language
     // @ts-ignore
-    global.navigator = { languages: ['fr-FR'] };
+    globalThis.navigator = { languages: ['fr-FR'] };
     
     const store = createLinguiniStore(config);
     const state = store.getState();
@@ -393,6 +393,204 @@ describe('LinguiniStore', () => {
         store.loadNamespace('en', 'dashboard', { keyPrefix: 'header' })
       ).rejects.toThrow('Linguini: No loader configured for namespace "dashboard"');
       expect(store.getState().partialLoadingStates.en?.dashboard?.header).toBe('error');
+    });
+  });
+
+  describe('version-aware loading and setVersions', () => {
+    it('refetches when version changes, deduplicates matching versions, and prevents stale overwrites', async () => {
+      let resolveV1!: (data: Record<string, any>) => void;
+      let resolveV2!: (data: Record<string, any>) => void;
+
+      const versionedLoader = vi.fn().mockImplementation((_lang, _ns, options) => {
+        if (options?.version === '1.0.0') {
+          return new Promise<Record<string, any>>((res) => {
+            resolveV1 = res;
+          });
+        }
+        if (options?.version === '2.0.0') {
+          return new Promise<Record<string, any>>((res) => {
+            resolveV2 = res;
+          });
+        }
+        return Promise.resolve({ title: `v-${options?.version}` });
+      });
+
+      const store = createLinguiniStore({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        versions: { common: '1.0.0' },
+        loader: versionedLoader,
+      });
+
+      const p1 = store.loadNamespace('en', 'common');
+      const p1Dup = store.loadNamespace('en', 'common');
+      expect(p1).toBe(p1Dup);
+
+      // Bump version while v1 is still in flight
+      store.setVersions({ common: '2.0.0' });
+      const p2 = store.loadNamespace('en', 'common');
+      expect(p2).not.toBe(p1);
+      expect(versionedLoader).toHaveBeenCalledTimes(2);
+
+      // Resolve v2 first, then v1 out-of-order
+      resolveV2({ title: 'Title v2' });
+      await p2;
+      expect(store.getState().translations.en?.common).toEqual({ title: 'Title v2' });
+      expect(store.getState().versions.en?.common).toBe('2.0.0');
+
+      resolveV1({ title: 'Stale v1' });
+      await p1;
+      // Stale v1 must not overwrite newer v2
+      expect(store.getState().translations.en?.common).toEqual({ title: 'Title v2' });
+      expect(store.getState().versions.en?.common).toBe('2.0.0');
+
+      // Calling loadNamespace again at v2 is a no-op
+      await store.loadNamespace('en', 'common');
+      expect(versionedLoader).toHaveBeenCalledTimes(2);
+    });
+
+    it('tracks partial prefix versions and supports setVersions merge & replace without clearing translations', async () => {
+      const partialLoader = vi.fn().mockImplementation(async (_lang, _ns, options) => {
+        const out: Record<string, any> = {};
+        for (const prefix of options?.keyPrefixes || []) {
+          out[prefix] = { label: `${prefix}@${options?.version}` };
+        }
+        return out;
+      });
+
+      const store = createLinguiniStore({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        namespaces: {
+          dashboard: { partial: true, partialMergeStrategy: 'subtree' },
+        },
+        loader: partialLoader,
+      });
+
+      store.setVersions({ dashboard: '1.0' });
+      await store.loadNamespace('en', 'dashboard', { keyPrefix: 'row1' });
+      expect(store.translate('dashboard', 'row1.label')).toBe('row1@1.0');
+      expect(store.getState().partialVersions.en?.dashboard?.row1).toBe('1.0');
+
+      // Same version -> deduplicated
+      await store.loadNamespace('en', 'dashboard', { keyPrefix: 'row1' });
+      expect(partialLoader).toHaveBeenCalledTimes(1);
+
+      // No-op setVersions does not notify listeners
+      const listener = vi.fn();
+      const unsub = store.subscribe(listener);
+      store.setVersions({ dashboard: '1.0' });
+      expect(listener).not.toHaveBeenCalled();
+
+      // Update version -> preserves old translation until refetched
+      store.setVersions({ dashboard: '2.0', other: '3.0' });
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(store.translate('dashboard', 'row1.label')).toBe('row1@1.0');
+
+      await store.loadNamespace('en', 'dashboard', { keyPrefix: 'row1' });
+      expect(partialLoader).toHaveBeenCalledTimes(2);
+      expect(store.translate('dashboard', 'row1.label')).toBe('row1@2.0');
+      expect(store.getState().partialVersions.en?.dashboard?.row1).toBe('2.0');
+
+      // Replace option drops omitted keys
+      store.setVersions({ other: '4.0' }, { replace: true });
+      expect(store.getState().targetVersions).toEqual({ other: '4.0' });
+      unsub();
+    });
+  });
+
+  describe('defaultValue and missingKeyFallback', () => {
+    it('supports string and object defaultValue with interpolation and missingKeyFallback', async () => {
+      const store = createLinguiniStore({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        missingKeyFallback: (ns, key) => `[${ns}/${key}]`,
+        loader: async () => ({ existing: 'Found {name}' }),
+      });
+
+      await store.loadNamespace('en', 'common');
+
+      expect(store.translate('common', 'existing', 'Fallback', { name: 'Ada' })).toBe('Found Ada');
+      expect(store.translate('common', 'missing', 'Default Text')).toBe('Default Text');
+      expect(store.translate('common', 'missing', 'Hello {name}', { name: 'Bob' })).toBe('Hello Bob');
+      expect(store.translate('common', 'missing', { defaultValue: 'From opts {n}', n: 5 })).toBe('From opts 5');
+      expect(store.translate('common', 'missing', '')).toBe('');
+      expect(store.translate('common', 'missing')).toBe('[common/missing]');
+
+      const emptyFallbackStore = createLinguiniStore({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        missingKeyFallback: '',
+        loader: async () => ({}),
+      });
+      expect(emptyFallbackStore.translate('common', 'nope')).toBe('');
+    });
+  });
+
+  describe('retry configuration', () => {
+    it('retries transient failures for full and partial loads and respects retryDelay', async () => {
+      let fullAttempts = 0;
+      const fullLoader = vi.fn().mockImplementation(async () => {
+        fullAttempts++;
+        if (fullAttempts < 3) {
+          throw new Error(`Transient ${fullAttempts}`);
+        }
+        return { ok: 'Recovered' };
+      });
+
+      let partialAttempts = 0;
+      const partialLoader = vi.fn().mockImplementation(async () => {
+        partialAttempts++;
+        if (partialAttempts < 2) {
+          throw new Error('Partial transient');
+        }
+        return { card: { title: 'Partial OK' } };
+      });
+
+      const delayFn = vi.fn().mockReturnValue(0);
+
+      const store = createLinguiniStore({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        retry: { maxRetries: 2, retryDelay: delayFn },
+        namespaces: {
+          common: { loader: fullLoader },
+          dashboard: {
+            partial: true,
+            loader: partialLoader,
+            retry: { maxRetries: 1, retryDelay: 0 },
+          },
+          alwaysFails: {
+            loader: vi.fn().mockRejectedValue(new Error('Permanent')),
+            retry: { maxRetries: 2, retryDelay: 0 },
+          },
+        },
+      });
+
+      await store.loadNamespace('en', 'common');
+      expect(fullAttempts).toBe(3);
+      expect(delayFn).toHaveBeenCalledTimes(2);
+      expect(store.translate('common', 'ok')).toBe('Recovered');
+
+      await store.loadNamespace('en', 'dashboard', { keyPrefix: 'card' });
+      expect(partialAttempts).toBe(2);
+      expect(store.translate('dashboard', 'card.title')).toBe('Partial OK');
+
+      await expect(store.loadNamespace('en', 'alwaysFails')).rejects.toThrow('Permanent');
+      expect(store.getState().loadingStates.en?.alwaysFails).toBe('error');
+    });
+
+    it('does not retry when no loader is configured', async () => {
+      const store = createLinguiniStore({
+        supportedLanguages: ['en'],
+        defaultLanguage: 'en',
+        retry: { maxRetries: 3, retryDelay: 0 },
+      });
+
+      await expect(store.loadNamespace('en', 'missingLoader')).rejects.toThrow(
+        'Linguini: No loader configured for namespace "missingLoader"'
+      );
+      expect(store.getState().loadingStates.en?.missingLoader).toBe('error');
     });
   });
 });

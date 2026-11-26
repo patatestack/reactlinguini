@@ -11,7 +11,7 @@ import { LinguiniProvider, useTranslation } from './context';
 import React from 'react';
 
 export * from './types';
-export { getNestedValue, interpolate, detectBrowserLanguage, deepMerge, setNestedValue } from './utils';
+export { getNestedValue, interpolate, detectBrowserLanguage, deepMerge, setNestedValue, setNestedValues } from './utils';
 export { createLinguiniStore } from './store';
 export {
   LinguiniProvider,
